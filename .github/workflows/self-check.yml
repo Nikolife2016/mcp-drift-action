@@ -1,0 +1,16 @@
+# Действие проверяет само себя ежедневно: если оно перестанет работать, мы узнаем об этом
+# раньше, чем те, кто его поставил.
+name: self-check
+on:
+  schedule: [{ cron: "0 6 * * *" }]
+  push: { branches: [main] }
+  workflow_dispatch:
+jobs:
+  drift:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./
+        with:
+          packages: "@modelcontextprotocol/server-filesystem,mcp-remote,@upstash/context7-mcp"
+          fail-on: never

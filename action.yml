@@ -1,0 +1,46 @@
+name: "MCP Drift Check"
+description: "Fail the build when an MCP server or npm dependency changed dangerously after you adopted it: install script added, ownership swapped, repository removed, package unpublished."
+branding:
+  icon: "activity"
+  color: "red"
+
+inputs:
+  packages:
+    description: "Comma-separated package names to check. Leave empty to auto-detect from package.json and MCP config files in the repo."
+    required: false
+    default: ""
+  days:
+    description: "How far back to look, in days."
+    required: false
+    default: "30"
+  fail-on:
+    description: "Severity that fails the build: high, medium, or never."
+    required: false
+    default: "high"
+  api:
+    description: "PulseFeed base URL. Override only for self-hosting."
+    required: false
+    default: "https://pulsefeed.dev"
+
+outputs:
+  events:
+    description: "Number of drift events found for the checked packages."
+    value: ${{ steps.check.outputs.events }}
+  high:
+    description: "Number of high-severity events."
+    value: ${{ steps.check.outputs.high }}
+
+runs:
+  using: "composite"
+  steps:
+    - id: check
+      shell: bash
+      # Никакой сборки и никаких зависимостей: node есть в каждом раннере, запрос один,
+      # ключа не нужно. Чем меньше шагов между «добавил в workflow» и «работает», тем выше
+      # шанс, что это действительно поставят.
+      run: node ${{ github.action_path }}/check.mjs
+      env:
+        INPUT_PACKAGES: ${{ inputs.packages }}
+        INPUT_DAYS: ${{ inputs.days }}
+        INPUT_FAIL_ON: ${{ inputs.fail-on }}
+        INPUT_API: ${{ inputs.api }}
