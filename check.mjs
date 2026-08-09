@@ -60,14 +60,27 @@ function fromMcpConfig(file) {
   return [...out];
 }
 
+const SKIP_DIRS = new Set([".git", "node_modules", ".github", "dist", "build", "coverage", "vendor", ".next", ".venv"]);
+
 function autodetect() {
   const found = new Set(fromPackageJson("."));
   for (const f of MCP_CONFIGS) if (existsSync(f)) fromMcpConfig(f).forEach(x => found.add(x));
-  // Монорепозитории: пакеты часто лежат в packages/*/package.json
-  for (const dir of ["packages", "apps"]) {
-    if (!existsSync(dir)) continue;
+
+  // Подкаталоги первого уровня целиком, а не только packages/ и apps/. Проверено на нашем
+  // собственном репозитории: package.json лежал в mcp/, автодетект нашёл ноль пакетов и шаг
+  // отрапортовал «нечего проверять» — то есть тихо не сделал ничего. Раскладка «пакет в
+  // подкаталоге» слишком обычна, чтобы требовать от человека перечислять имена руками.
+  let dirs = [];
+  try { dirs = readdirSync(".", { withFileTypes: true }).filter(d => d.isDirectory()).map(d => d.name); } catch { /* корень нечитаем */ }
+  for (const dir of dirs) {
+    if (SKIP_DIRS.has(dir) || dir.startsWith(".")) continue;
+    fromPackageJson(dir).forEach(x => found.add(x));
+    // Ещё уровень вглубь: monorepo обычно packages/<name>/package.json
     try {
-      for (const sub of readdirSync(dir)) fromPackageJson(join(dir, sub)).forEach(x => found.add(x));
+      for (const sub of readdirSync(dir, { withFileTypes: true })) {
+        if (!sub.isDirectory() || SKIP_DIRS.has(sub.name)) continue;
+        fromPackageJson(join(dir, sub.name)).forEach(x => found.add(x));
+      }
     } catch { /* нечитаемый подкаталог не должен ронять шаг */ }
   }
   return [...found];
