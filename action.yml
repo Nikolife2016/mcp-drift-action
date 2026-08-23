@@ -1,5 +1,5 @@
 name: "MCP Drift Check"
-description: "Fail the build when an MCP server or npm dependency changed dangerously after you adopted it: install script added, ownership swapped, repository removed, package unpublished."
+description: "Fail the build when an MCP server or npm dependency turned dangerous after you adopted it: install script, owner, repo."
 branding:
   icon: "activity"
   color: "red"
