@@ -51,6 +51,12 @@ If the API is unreachable, the step says so and **passes**. A check that goes re
 
 Routine version bumps are counted but not printed. They are context for the other events, not news.
 
+## Why it re-checks on every run, not only the packages that looked risky
+
+The tempting design is to re-audit only the dependencies most likely to have changed and skip the rest. It saves work and it misses the point. An independent measurement of the MCP registry ([Bharti & Agnihotri, *Declared vs. Observed*](https://doi.org/10.5281/zenodo.22649163)) found that between 43% and 51% of the servers that changed had no prior change to rank on — they were new — so no history-based ranking reaches them at any budget. The same corpus put the rate a re-check has to outrun at **18.3% of tools over 21 days**.
+
+So this check runs against every dependency in your lockfile on every CI run rather than against a shortlist. Ranking decides the order work is done inside a run, never what gets checked at all. A dependency that has been quiet is exactly the one a drift-ranked scanner stops looking at, and quiet is not the same as unchanged.
+
 ## Where the data comes from
 
 [PulseFeed](https://pulsefeed.dev) re-reads npm metadata for the MCP package population every night — install scripts, ownership, provenance, repository, licence, liveness — and diffs each package against the previous day's snapshot. An event exists only because a snapshot from before it exists.
