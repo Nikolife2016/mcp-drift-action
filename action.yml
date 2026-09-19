@@ -21,14 +21,21 @@ inputs:
     description: "PulseFeed base URL. Override only for self-hosting."
     required: false
     default: "https://pulsefeed.dev"
+  allowlist:
+    description: "Path to the file of reviewed events. Each entry acknowledges one eventId with reviewedBy, reviewedAt and reason; acknowledged events are reported but do not fail the build."
+    required: false
+    default: ".mcp-drift-allowlist.json"
 
 outputs:
   events:
-    description: "Number of drift events found for the checked packages."
+    description: "Number of open (unacknowledged) notable drift events."
     value: ${{ steps.check.outputs.events }}
   high:
-    description: "Number of high-severity events."
+    description: "Number of open (unacknowledged) high-severity events."
     value: ${{ steps.check.outputs.high }}
+  acknowledged:
+    description: "Number of notable events acknowledged in the allowlist."
+    value: ${{ steps.check.outputs.acknowledged }}
 
 runs:
   using: "composite"
@@ -44,3 +51,4 @@ runs:
         INPUT_DAYS: ${{ inputs.days }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_API: ${{ inputs.api }}
+        INPUT_ALLOWLIST: ${{ inputs.allowlist }}

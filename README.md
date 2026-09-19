@@ -40,10 +40,40 @@ That is the whole setup. No API key, no signup, no dependencies. Package names a
 | `days` | `30` | How far back to look |
 | `fail-on` | `high` | `high`, `medium`, or `never` (report only) |
 | `api` | `https://pulsefeed.dev` | Override only for self-hosting |
+| `allowlist` | `.mcp-drift-allowlist.json` | File of reviewed events, see below |
 
 ## Outputs
 
-`events` — notable changes found. `high` — how many were high severity.
+`events` — open notable changes. `high` — how many of them are high severity. `acknowledged` — how many notable changes were acknowledged in the allowlist.
+
+## When it fires for real: acknowledging a reviewed change
+
+A real event stays in the window for `days` days. Without a way to say "we looked at this", the build stays red for a month and the check gets removed — which is worse than no check. So there is a file for reviewed events, `.mcp-drift-allowlist.json` in the repository root (path configurable with `allowlist`):
+
+```json
+{
+  "reviewed": [
+    {
+      "eventId": "eb9c6cb717f2e882",
+      "package": "@modelcontextprotocol/sdk",
+      "type": "maintainer_changed",
+      "reviewedBy": "nikolife",
+      "reviewedAt": "2026-09-19",
+      "reason": "one maintainer left the team; confirmed with the remaining maintainers, no release since 1.30.0"
+    }
+  ]
+}
+```
+
+When the build fails, the log prints this block ready to paste, with the `eventId` filled in.
+
+Three rules make this safe rather than a mute button:
+
+- **You acknowledge the event, not the package.** `eventId` is a content hash of one specific change (its recipe is published in the feed as `idRecipe`). A new event on the same package fails the build again.
+- **Every entry names who, when and why.** `reviewedBy`, `reviewedAt` and `reason` are required; an entry without them is ignored with a warning. `package` and `type` are optional, but if present they must match the event — pasting the wrong id does nothing.
+- **A broken file means no acknowledgements.** Invalid JSON is reported and treated as empty, so an error leads to a red build, never to a green one.
+
+Acknowledged events are still printed and still appear in the job summary, marked with who reviewed them. They are only excluded from the failure decision and from the `events`/`high` outputs.
 
 ## When it does not fail your build
 
