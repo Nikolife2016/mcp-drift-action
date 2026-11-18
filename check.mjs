@@ -7,10 +7,21 @@
 // Rug pull проходит мимо статической проверки по определению: на момент проверки код был чист.
 //
 // Ноль зависимостей, запросы пакетами, без ключа. Node 18+ (есть в раннерах GitHub).
-import { readFileSync, existsSync, readdirSync, appendFileSync } from "node:fs";
-import { join } from "node:path";
+import { readFileSync, existsSync, readdirSync, appendFileSync, realpathSync, lstatSync } from "node:fs";
+import { join, resolve } from "node:path";
 
-const API = (process.env.INPUT_API || "https://pulsefeed.dev").replace(/\/+$/, "");
+function apiBase(value) {
+  // Keep inventory at the exact configured origin/path. Plain HTTP is for loopback only.
+  try {
+    if (!/^https?:\/\/[^/?#@]+(?:\/|$)/i.test(value) || /[?#\\\s]/u.test(value)) return null;
+    const url = new URL(value);
+    if (url.username || url.password) return null;
+    if (url.protocol === "http:" && !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname)) return null;
+    return url.href.replace(/\/+$/, "");
+  } catch { return null; }
+}
+
+const API = apiBase(process.env.INPUT_API || "https://pulsefeed.dev");
 const DAYS = Math.max(1, Math.min(365, Number(process.env.INPUT_DAYS) || 30));
 const FAIL_ON = (process.env.INPUT_FAIL_ON || "never").trim().toLowerCase();
 const ALLOWLIST = process.env.INPUT_ALLOWLIST || ".mcp-drift-allowlist.json";
@@ -27,20 +38,24 @@ const MCP_CONFIGS = [
   "claude_desktop_config.json", ".claude/settings.json", ".claude/settings.local.json",
 ];
 
-function fromPackageJson(dir) {
-  const p = join(dir, "package.json");
-  if (!existsSync(p)) return [];
+function readWorkspaceJson(file) {
   try {
-    const j = JSON.parse(readFileSync(p, "utf8"));
-    return [...Object.keys(j.dependencies || {}), ...Object.keys(j.devDependencies || {})];
-  } catch { return []; }
+    if (realpathSync(file) !== resolve(file) || !lstatSync(file).isFile()) return null;
+    return JSON.parse(readFileSync(file, "utf8"));
+  } catch { return null; }
+}
+
+function fromPackageJson(dir) {
+  const manifest = readWorkspaceJson(join(dir, "package.json"));
+  return [manifest?.dependencies, manifest?.devDependencies].flatMap(group =>
+    group && typeof group === "object" && !Array.isArray(group) ? Object.keys(group) : []);
 }
 
 // MCP-серверы обычно объявлены как `npx -y <пакет>` или `command: npx, args: [-y, <пакет>]`.
 // Вытаскиваем имя пакета из обеих форм, отбрасывая флаги и версии.
 function fromMcpConfig(file) {
-  let j;
-  try { j = JSON.parse(readFileSync(file, "utf8")); } catch { return []; }
+  const j = readWorkspaceJson(file);
+  if (!j || typeof j !== "object") return [];
   const out = new Set();
   const servers = j.mcpServers || j.servers || {};
   for (const s of Object.values(servers)) {
@@ -92,46 +107,66 @@ function autodetect() {
 // eventId, содержательный хеш события из ленты; новая смена на том же пакете снова уронит сборку.
 // Запись обязана назвать, кто, когда и почему. Нечитаемый файл = подтверждений нет: ошибка
 // должна вести в красное, а не в зелёное.
+// Display only fixed event types, approved package names and protocol event IDs in CI.
+// Other feed and review fields may contain private dependency names or credentials.
+const knownTypes = new Set([
+  "install_script_added", "maintainer_changed", "repo_removed", "repo_changed", "unpublished", "went_dark",
+  "recovered", "provenance_lost", "deps_spike", "license_removed", "verdict_worsened", "verdict_improved",
+  "version_published", "skill_instructions_changed", "skill_renamed", "name_resurrected", "name_lookalike",
+]);
+const isEventId = id => typeof id === "string" && id.length === 16 && /^[0-9a-f]{16}$/.test(id);
+const changeLabel = e => knownTypes.has(e.type) ? e.type.replace(/_/g, " ") : "change";
+
 function loadAllowlist(file) {
   if (!existsSync(file)) return { entries: new Map(), note: null };
   let j;
   try { j = JSON.parse(readFileSync(file, "utf8")); }
-  catch (e) { return { entries: new Map(), note: `allowlist ${file} is not valid JSON (${e.message}); treating as empty` }; }
+  catch { return { entries: new Map(), note: "allowlist is unreadable or is not valid JSON; treating as empty" }; }
   const list = Array.isArray(j) ? j : Array.isArray(j?.reviewed) ? j.reviewed : null;
-  if (!list) return { entries: new Map(), note: `allowlist ${file} must be {"reviewed": [...]}; treating as empty` };
+  if (!list) return { entries: new Map(), note: `allowlist must be {"reviewed": [...]}; treating as empty` };
   const entries = new Map(); const bad = [];
   list.forEach((r, i) => {
     const ok = r && typeof r === "object"
-      && /^[0-9a-f]{16}$/.test(String(r.eventId || ""))
+      && isEventId(r.eventId)
       && typeof r.reviewedBy === "string" && r.reviewedBy.trim()
       && typeof r.reviewedAt === "string" && /^\d{4}-\d{2}-\d{2}/.test(r.reviewedAt)
       && typeof r.reason === "string" && r.reason.trim();
     if (ok) entries.set(r.eventId, r); else bad.push(i);
   });
-  const note = bad.length ? `allowlist ${file}: ${bad.length} entr${bad.length === 1 ? "y" : "ies"} ignored (index ${bad.join(", ")}) — each needs eventId (16 hex), reviewedBy, reviewedAt (YYYY-MM-DD) and reason` : null;
+  const note = bad.length ? `allowlist: ${bad.length} entr${bad.length === 1 ? "y" : "ies"} ignored (index ${bad.join(", ")}) — each needs eventId (16 hex), reviewedBy, reviewedAt (YYYY-MM-DD) and reason` : null;
   return { entries, note };
 }
 
 // Подтверждение действует, только если названные в нём пакет и тип совпадают с событием —
 // защита от вставки чужого id. Возвращает запись или причину отказа.
 function acknowledgement(e, entries) {
-  if (!e.eventId) return { entry: null, why: "event carries no eventId (feed too old to acknowledge)" };
+  if (!isEventId(e.eventId)) return { entry: null, why: "event has no valid eventId for acknowledgement" };
   const r = entries.get(e.eventId);
   if (!r) return { entry: null, why: null };
-  if (r.package && r.package !== e.id) return { entry: null, why: `acknowledgement ${e.eventId} names package ${r.package}, but the event is on ${e.id} — ignored` };
-  if (r.type && r.type !== e.type) return { entry: null, why: `acknowledgement ${e.eventId} names type ${r.type}, but the event is ${e.type} — ignored` };
+  if (r.package && r.package !== e.id) return { entry: null, why: `acknowledgement ${e.eventId} package differs from the event on ${e.id} — ignored` };
+  if (r.type && r.type !== e.type) return { entry: null, why: `acknowledgement ${e.eventId} type differs from the event on ${e.id} — ignored` };
   return { entry: r, why: null };
 }
 
 // ── проверка ───────────────────────────────────────────────────────────────
-const manual = (process.env.INPUT_PACKAGES || "").split(",").map(s => s.trim()).filter(Boolean);
-// Discovery from the workspace can include private package names. Sharing is opt-in.
-const shareDiscovered = process.env.INPUT_SHARE_DISCOVERED === "true";
-const candidates = manual.length ? manual : (shareDiscovered ? autodetect() : []);
+const manual = process.env.INPUT_PACKAGES || "";
+const discover = manual === "" && process.env.INPUT_SHARE_DISCOVERED === "true";
+const configured = discover ? process.env.INPUT_APPROVED_DISCOVERED_PACKAGES || "" : manual;
+const names = [...new Set(configured.split(",").map(value => value.trim()).filter(Boolean))];
 const npmName = /^(?:@[a-z0-9][a-z0-9._~-]*\/)?[a-z0-9][a-z0-9._~-]*$/i;
-const packages = [...new Set(candidates.filter(name => name.length <= 214 && npmName.test(name)))];
-
-const invalid = new Set(candidates.filter(name => name.length > 214 || !npmName.test(name))).size;
+const approved = names.filter(name => name.length <= 214 && npmName.test(name));
+const invalid = names.length - approved.length;
+const invalidDiscovery = discover && (!approved.length || invalid > 0);
+let packages = approved;
+if (discover) {
+  const found = new Set(!invalidDiscovery && API ? autodetect() : []);
+  packages = approved.filter(name => found.has(name));
+}
+if (invalidDiscovery || !API) {
+  console.log(invalidDiscovery ? "Discovery requires approved-discovered-packages with exact package names."
+    : "Invalid API base URL. Use HTTPS or loopback HTTP without credentials, a query or a fragment.");
+  process.exitCode = 1;
+}
 const validPolicy = ["never", "high", "medium"].includes(FAIL_ON);
 const events = [];
 const observed = new Set();
@@ -141,13 +176,13 @@ let incomplete = false;
 let sourcesIncomplete = false;
 let truncated = false;
 if (!validPolicy) console.log("Invalid fail-on policy. Choose never, medium or high.");
-if (!packages.length) console.log("No approved package names to check. Supply packages or explicitly enable share-discovered.");
+if (!packages.length) console.log("No approved package names to check. Supply packages, or enable discovery with an explicit approval list.");
 
 // Keep both the API's 200-name limit and a bounded request target for scoped npm names.
 const batches = [];
 let batch = [];
 let encodedLength = 0;
-for (const name of packages) {
+for (const name of API ? packages : []) {
   const length = encodeURIComponent(name).length;
   if (batch.length === 200 || encodedLength + length + 3 > 6000) {
     batches.push(batch);
@@ -161,8 +196,8 @@ if (batch.length) batches.push(batch);
 for (const c of validPolicy ? batches : []) {
   try {
     const url = `${API}/mcp/drift.json?days=${DAYS}&packages=${encodeURIComponent(c.join(","))}`;
-    const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });   // зависшая сеть не должна держать шаг вечно
-    if (!r.ok) throw new Error(`${API} answered ${r.status}`);
+    const r = await fetch(url, { redirect: "error", headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });   // зависшая сеть не должна держать шаг вечно
+    if (!r.ok) throw new Error("unsuccessful drift response");
     const j = await r.json();
     if ((SELF_CHECK || j?.requested !== undefined) &&
         (!Array.isArray(j?.requested) || j.requested.length !== c.length || !c.every(pkg => j.requested.includes(pkg)))) {
@@ -222,12 +257,10 @@ for (const e of notable.sort((a, b) => SEV_RANK[b.severity] - SEV_RANK[a.severit
   (a.entry ? acked : open).push([e, a.entry]);
 }
 for (const [e] of open) {
-  const vers = e.prevVersion && e.version && e.prevVersion !== e.version ? ` (${e.prevVersion} → ${e.version})` : "";
-  console.log(`${ICON[e.severity] || "•"} ${e.id}${vers}: ${e.headline}`);
-  console.log(`   ${API}/mcp/s/${encodeURIComponent(e.id)}`);
+  console.log(`${ICON[e.severity]} ${e.id}: ${changeLabel(e)}${isEventId(e.eventId) ? " (" + e.eventId + ")" : ""}`);
 }
-for (const [e, r] of acked) {
-  console.log(`✅ ${e.id}: ${e.type.replace(/_/g, " ")} — acknowledged by ${r.reviewedBy} on ${r.reviewedAt.slice(0, 10)}: ${r.reason}`);
+for (const [e] of acked) {
+  console.log(`✅ ${e.id}: ${changeLabel(e)} — acknowledged (${e.eventId})`);
 }
 
 const statusByCoverage = {
@@ -254,17 +287,17 @@ console.log(`Drift check: ${checkStatus}; coverage: ${coverageStatus}; observed:
 
 const summary = process.env.GITHUB_STEP_SUMMARY;
 if (summary) {
-  // Text in the table comes from the API and the allowlist. Keep it inside its cell.
+  // Keep npm punctuation inside the Markdown table cell.
   const cell = value => String(value).replace(/[\r\n\t]+/g, " ").replace(/[&<>|\\`{}[\]()!*_~]/g, c => `&#${c.charCodeAt(0)};`);
   const detail = [...open.map(([e]) => [e, "open"]),
-    ...acked.map(([e, r]) => [e, `acknowledged by ${r.reviewedBy} (${r.reviewedAt.slice(0, 10)})`])];
+    ...acked.map(([e]) => [e, "acknowledged"])];
   const rows = detail.map(([e, decision]) =>
-    "| " + [e.severity, e.id, e.type.replace(/_/g, " "), e.headline, decision].map(cell).join(" | ") + " |");
+    "| " + [e.severity, e.id, changeLabel(e), isEventId(e.eventId) ? e.eventId : "—", decision].map(cell).join(" | ") + " |");
   const lines = ["## MCP Drift Check", "",
     `Result: **${checkStatus}**. Coverage: **${coverageStatus}**. Client adoption baseline: **${outputs.baseline_status}**. Event failure threshold: **${outputs.fail_on}**.`,
     `Observed packages: ${observed.size}. Without evidence: ${unknown}. Invalid names: ${invalid}. Source error: ${sourceError}. Truncated: ${truncated}.`,
     `Returned changes: ${routine} routine, ${open.length} open notable, ${acked.length} acknowledged notable.`];
-  if (rows.length) lines.push("", "| Severity | Package | Change | Detail | Status |", "|---|---|---|---|---|", ...rows);
+  if (rows.length) lines.push("", "| Severity | Package | Change | Event ID | Status |", "|---|---|---|---|---|", ...rows);
   try { appendFileSync(summary, lines.join("\n") + "\n"); } catch { /* optional summary */ }
 }
 
@@ -274,9 +307,9 @@ if (failing.length) {
   console.log(`\nFailing the build: fail-on is "${FAIL_ON}".`);
   // Готовый к вставке фрагмент: подтверждение — это решение человека после проверки, и путь к
   // нему должен быть короче, чем путь к снятию проверки.
-  console.log(`\nIf you have reviewed ${failing.length === 1 ? "this change" : "these changes"} and accept ${failing.length === 1 ? "it" : "them"}, add to ${ALLOWLIST} (the build stays red for anything not listed, and for any new event on the same package):`);
+  console.log(`\nIf you have reviewed ${failing.length === 1 ? "this change" : "these changes"} and accept ${failing.length === 1 ? "it" : "them"}, add to the configured allowlist (the build stays red for anything not listed, and for any new event on the same package):`);
   const today = new Date().toISOString().slice(0, 10);
-  const snippet = failing.filter(([e]) => e.eventId).map(([e]) => JSON.stringify({ eventId: e.eventId, package: e.id, type: e.type, reviewedBy: "<your name>", reviewedAt: today, reason: "<why this change is acceptable>" }));
+  const snippet = failing.filter(([e]) => isEventId(e.eventId)).map(([e]) => JSON.stringify({ eventId: e.eventId, package: e.id, type: knownTypes.has(e.type) ? e.type : undefined, reviewedBy: "<your name>", reviewedAt: today, reason: "<why this change is acceptable>" }));
   if (snippet.length) console.log(`{ "reviewed": [\n  ${snippet.join(",\n  ")}\n] }`);
   process.exit(1);
 }

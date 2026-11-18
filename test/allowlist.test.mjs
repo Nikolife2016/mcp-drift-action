@@ -26,7 +26,7 @@ async function withServer(events, fn, { status = 200, requested, coverage, total
 
 // Асинхронно: сервер живёт в этом же процессе, и синхронный запуск заблокировал бы цикл событий —
 // дочерний check.mjs ждал бы ответа вечно (первая версия теста так и висла).
-function run(api, { allowlist, failOn = "high", packages = "@modelcontextprotocol/sdk", selfCheck = false, auto = false, manifest, outputIsDirectory = false } = {}) {
+function run(api, { allowlist, failOn = "high", packages = "@modelcontextprotocol/sdk", selfCheck = false, auto = false, approved = "", manifest, outputIsDirectory = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mda-"));
   if (manifest) writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
   const outFile = join(dir, "gh-output");
@@ -34,7 +34,7 @@ function run(api, { allowlist, failOn = "high", packages = "@modelcontextprotoco
   const summaryFile = join(dir, "summary");
   return new Promise(resolve => {
     const child = spawn(process.execPath, [CHECK], { cwd: dir,
-      env: { ...process.env, INPUT_SHARE_DISCOVERED: String(auto), INPUT_API: api, INPUT_PACKAGES: packages, PULSEFEED_SELF_CHECK: String(selfCheck), INPUT_FAIL_ON: failOn, GITHUB_OUTPUT: outputIsDirectory ? dir : outFile, GITHUB_STEP_SUMMARY: summaryFile } });
+      env: { ...process.env, INPUT_SHARE_DISCOVERED: String(auto), INPUT_APPROVED_DISCOVERED_PACKAGES: approved, INPUT_API: api, INPUT_PACKAGES: packages, PULSEFEED_SELF_CHECK: String(selfCheck), INPUT_FAIL_ON: failOn, GITHUB_OUTPUT: outputIsDirectory ? dir : outFile, GITHUB_STEP_SUMMARY: summaryFile } });
     let out = "";
     child.stdout.on("data", d => out += d); child.stderr.on("data", d => out += d);
     child.on("close", code => {
@@ -57,17 +57,17 @@ test("high событие без файла подтверждений роня�
   assert.equal(r.outputs.events, "1"); assert.equal(r.outputs.high, "1"); assert.equal(r.outputs.acknowledged, "0");
 }));
 
-test("подтверждённое событие: сборка зелёная, событие напечатано с автором, выходы считают открытое", () => withServer([HIGH, LOW], async api => {
+test("подтверждённое событие: сборка зелёная, событие отмечено в журнале, выходы считают открытое", () => withServer([HIGH, LOW], async api => {
   const r = await run(api, { allowlist: { reviewed: [ACK] } });
   assert.equal(r.code, 0);
-  assert.match(r.out, /✅ @modelcontextprotocol\/sdk: maintainer changed — acknowledged by nikolife on 2026-09-19/);
+  assert.match(r.out, /✅ @modelcontextprotocol\/sdk: maintainer changed — acknowledged \(eb9c6cb717f2e882\)/);
   assert.equal(r.outputs.events, "0"); assert.equal(r.outputs.high, "0"); assert.equal(r.outputs.acknowledged, "1");
 }));
 
 test("подтверждение привязано к событию, не к пакету: новая смена на том же пакете снова роняет", () => withServer([HIGH, HIGH2], async api => {
   const r = await run(api, { allowlist: { reviewed: [ACK] } });
   assert.equal(r.code, 1);
-  assert.match(r.out, /✅ .*acknowledged by nikolife/);
+  assert.match(r.out, /✅ .*acknowledged/);
   assert.match(r.out, new RegExp(`"eventId":"${HIGH2.eventId}"`));
   assert.equal(r.outputs.high, "1"); assert.equal(r.outputs.acknowledged, "1");
 }));
@@ -75,7 +75,7 @@ test("подтверждение привязано к событию, не к �
 test("подтверждение с чужим пакетом не действует и объясняет почему", () => withServer([HIGH], async api => {
   const r = await run(api, { allowlist: { reviewed: [{ ...ACK, package: "some-other-package" }] } });
   assert.equal(r.code, 1);
-  assert.match(r.out, /names package some-other-package, but the event is on @modelcontextprotocol\/sdk — ignored/);
+  assert.match(r.out, /package differs from the event on @modelcontextprotocol\/sdk — ignored/);
 }));
 
 test("запись без причины или автора игнорируется с предупреждением, сборка красная", () => withServer([HIGH], async api => {
@@ -154,7 +154,7 @@ test("truncation remains visible even with an actionable event", () => withServe
   assert.equal(outputs.truncated, "true");
 }, { total: 2, requested: [HIGH.id], coverage: { observed: [HIGH.id], sourcesComplete: true } }));
 
-test("private inventory is only transmitted with opt-in", async () => {
+test("discovery requests only exact approved matches and sends nothing on a missing policy", async () => {
   const calls = [];
   const server = createServer((req, res) => {
     calls.push(new URL(req.url, "http://localhost").searchParams.get("packages"));
@@ -163,11 +163,41 @@ test("private inventory is only transmitted with opt-in", async () => {
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
     const api = "http://127.0.0.1:" + server.address().port;
-    const options = { packages: "", manifest: { dependencies: { "@private/fixture": "*" } } };
+    const options = { packages: "", manifest: { dependencies: { "@private/fixture": "*", "public-demo": "*" } } };
     assert.equal((await run(api, options)).outputs.check_status, "not_checked");
+    assert.equal((await run(api, { ...options, approved: "public-demo" })).outputs.check_status, "not_checked");
+    const missing = await run(api, { ...options, auto: true });
+    assert.equal(missing.code, 1);
+    assert.equal(missing.outputs.check_status, "not_checked");
+    const invalid = await run(api, { ...options, auto: true, approved: "public-demo,@private/*" });
+    assert.equal(invalid.code, 1);
     assert.deepEqual(calls, []);
-    await run(api, { ...options, auto: true });
-    assert.deepEqual(calls, ["@private/fixture"]);
+    await run(api, { ...options, auto: true, approved: "public-demo,missing" });
+    assert.deepEqual(calls, ["public-demo"]);
+    await run(api, { ...options, packages: ", ,", auto: true, approved: "public-demo" });
+    assert.deepEqual(calls, ["public-demo"]);
+  } finally { server.close(); }
+});
+
+test("only the approved API prefix receives a request and redirects are declined", async () => {
+  const calls = [];
+  const server = createServer((req, res) => {
+    calls.push(new URL(req.url, "http://localhost").pathname);
+    res.writeHead(302, { location: "/other" }); res.end();
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const base = "http://127.0.0.1:" + server.address().port;
+    for (const bad of [base + "?secret=fixture", base + "#fixture", base.replace("://", "://user:fixture@")]) {
+      const result = await run(bad);
+      assert.equal(result.code, 1);
+      assert.equal(result.outputs.check_status, "not_checked");
+      assert.doesNotMatch(result.out + result.summary, /fixture/);
+    }
+    assert.deepEqual(calls, []);
+    const redirected = await run(base + "/api/v1/");
+    assert.equal(redirected.outputs.source_error, "true");
+    assert.deepEqual(calls, ["/api/v1/mcp/drift.json"]);
   } finally { server.close(); }
 });
 

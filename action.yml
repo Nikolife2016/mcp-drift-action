@@ -10,9 +10,13 @@ inputs:
     required: false
     default: ""
   share-discovered:
-    description: "Permit transmission of discovered workspace package names, including private names."
+    description: "Check discovered workspace packages that also appear in approved-discovered-packages."
     required: false
     default: "false"
+  approved-discovered-packages:
+    description: "Comma-separated exact names approved for discovery. Requires share-discovered; packages takes priority."
+    required: false
+    default: ""
   days:
     description: "How far back to look, in days."
     required: false
@@ -86,6 +90,7 @@ runs:
       env:
         INPUT_PACKAGES: ${{ inputs.packages }}
         INPUT_SHARE_DISCOVERED: ${{ inputs.share-discovered }}
+        INPUT_APPROVED_DISCOVERED_PACKAGES: ${{ inputs.approved-discovered-packages }}
         INPUT_DAYS: ${{ inputs.days }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_API: ${{ inputs.api }}

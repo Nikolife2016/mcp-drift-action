@@ -1,6 +1,6 @@
 # MCP Drift Check
 
-Report dependency changes observed in your selected time window. Version 2 runs in advisory mode by default.
+Report dependency changes observed in your selected time window. Version 3 runs in advisory mode by default.
 
 Every scanner answers one question: *is this package safe today?* A rug pull is the other question. The package was clean when it was reviewed, collected installs for weeks, and only then shipped a patch that runs code on `npm i`. Static scanning cannot catch that by definition — at review time the code was clean.
 
@@ -25,13 +25,22 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: Nikolife2016/mcp-drift-action@v2
+      - uses: Nikolife2016/mcp-drift-action@v3
         with:
           packages: "mcp-remote,@upstash/context7-mcp"
           fail-on: never  # report changes without blocking the build
 ```
 
-**Upgrading from v1.** Set `packages` to an approved list, or set `share-discovered: true` to allow sending names from manifests and MCP configs. Version 2 defaults to `fail-on: never`. Set `fail-on: high` explicitly to keep the v1 blocking threshold. The outputs below are available in v2.
+**Upgrading from v2.** Explicit `packages` lists continue to work. If you use discovery, set both inputs below when upgrading to v3. In v2.0.0, `share-discovered: true` can send every discovered name, including private dependencies.
+
+```yaml
+- uses: Nikolife2016/mcp-drift-action@v3
+  with:
+    share-discovered: true
+    approved-discovered-packages: "mcp-remote,@upstash/context7-mcp"
+```
+
+Discovery sends the intersection of this list and the names found in supported manifests or MCP configs. Matching is exact and case-sensitive. The explicit `packages` input takes priority and works independently of the contents of the repository. A discovery request without a valid approval list stops with a configuration error before sending a request. An approved list with no matches produces `not_checked` and zero requests. For a blocking severity threshold, set `fail-on: high` or `medium` explicitly.
 
 **Run it on a schedule, not only on pull requests.** Drift happens between your commits, not during them — that is the entire point.
 
@@ -40,11 +49,18 @@ jobs:
 | Input | Default | What it does |
 |---|---|---|
 | `packages` | empty | Comma-separated names approved for submission |
-| `share-discovered` | `false` | Permit sending discovered names, including private packages |
+| `share-discovered` | `false` | Enable local discovery using the exact list below |
+| `approved-discovered-packages` | empty | Comma-separated names approved for discovery mode. Use literal npm names, including the full scope for a scoped package. |
 | `days` | `30` | How far back to look |
 | `fail-on` | `never` | `high`, `medium`, or `never` (report only) |
-| `api` | `https://pulsefeed.dev` | Override only for self-hosting |
+| `api` | `https://pulsefeed.dev` | HTTPS base URL, optionally with a path prefix. Local tests can use HTTP on loopback. Redirects are refused. |
 | `allowlist` | `.mcp-drift-allowlist.json` | File of reviewed events, see below |
+
+### What leaves the runner
+
+The Action calls `GET <api>/mcp/drift.json` with two query fields, `days` and `packages`. The destination receives the approved names that were selected and can log the request URL. Approval is the caller’s choice: a scoped or unscoped name may be private. Keep confidential names out of the approval inputs unless you intend to share them with that destination. Dependency versions, manifest values, workspace paths, MCP arguments and review notes stay local.
+
+The Action emits counters and status fields. For findings, its own logs and job summary use selected names and bounded event metadata. GitHub can separately display workflow inputs and runner diagnostics. GitHub and the API operator control retention in their respective systems.
 
 ## Outputs
 
@@ -80,7 +96,7 @@ A real event stays in the window for `days` days. Without a way to say "we looke
 }
 ```
 
-When the build fails, the log prints this block ready to paste, with the `eventId` filled in.
+Use the event identifier in the failure output to record a review in this file.
 
 Three rules make this safe rather than a mute button:
 
@@ -88,7 +104,7 @@ Three rules make this safe rather than a mute button:
 - **Every entry names who, when and why.** `reviewedBy`, `reviewedAt` and `reason` are required; an entry without them is ignored with a warning. `package` and `type` are optional, but if present they must match the event — pasting the wrong id does nothing.
 - **A broken file means no acknowledgements.** Invalid JSON is reported and treated as empty, so an error leads to a red build, never to a green one.
 
-Acknowledged events are still printed and still appear in the job summary, marked with who reviewed them. They are only excluded from the failure decision and from the `events`/`high` outputs.
+Acknowledged events appear in the job summary with their review status. The reviewer and reason remain in the local review file. Only open events contribute to the failure decision and the `events`/`high` outputs.
 
 ## When it does not fail your build
 
@@ -100,7 +116,7 @@ Routine version bumps are counted but not printed. They are context for the othe
 
 The tempting design is to re-audit only the dependencies most likely to have changed and skip the rest. It saves work and it misses the point. An independent measurement of the MCP registry ([Bharti & Agnihotri, *Declared vs. Observed*](https://doi.org/10.5281/zenodo.22649163)) found that between 43% and 51% of the servers that changed had no prior change to rank on — they were new — so no history-based ranking reaches them at any budget. The same corpus put the rate a re-check has to outrun at **18.3% of tools over 21 days**.
 
-This check queries each approved name on every CI run. Opt-in discovery reads supported manifests and MCP config files. It does not enumerate transitive dependencies from lockfiles. Ranking decides the order work is done inside a run, never what gets checked at all. A dependency that has been quiet is exactly the one a drift-ranked scanner stops looking at, and quiet is not the same as unchanged.
+Explicit mode queries the selected package names on each run. Discovery mode reads supported manifests and MCP configs locally and queries matching approved names. It does not enumerate transitive dependencies from lockfiles. Ranking decides the order work is done inside a run, never what gets checked at all. A dependency that has been quiet is exactly the one a drift-ranked scanner stops looking at, and quiet is not the same as unchanged.
 
 ## Where the data comes from
 
