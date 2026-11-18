@@ -1,22 +1,26 @@
 name: "MCP Drift Check"
-description: "Fail the build when an MCP server or npm dependency turned dangerous after you adopted it: install script, owner, repo."
+description: "Report observed npm and MCP dependency changes, feed availability and package coverage, with optional CI failure thresholds."
 branding:
   icon: "activity"
   color: "red"
 
 inputs:
   packages:
-    description: "Comma-separated package names to check. Leave empty to auto-detect from package.json and MCP config files in the repo."
+    description: "Comma-separated package names approved for submission to the configured API."
     required: false
     default: ""
+  share-discovered:
+    description: "Permit transmission of discovered workspace package names, including private names."
+    required: false
+    default: "false"
   days:
     description: "How far back to look, in days."
     required: false
     default: "30"
   fail-on:
-    description: "Severity that fails the build: high, medium, or never."
+    description: "Optional threshold for open events: never (advisory), high, or medium."
     required: false
-    default: "high"
+    default: "never"
   api:
     description: "PulseFeed base URL. Override only for self-hosting."
     required: false
@@ -27,6 +31,42 @@ inputs:
     default: ".mcp-drift-allowlist.json"
 
 outputs:
+  coverage_status:
+    description: "Observation and completeness independent of findings: complete, partial, unknown, unavailable or not_checked."
+    value: ${{ steps.check.outputs.coverage_status }}
+  baseline_status:
+    description: "Client-approved package baseline: unknown. This version has no adoption-baseline input."
+    value: ${{ steps.check.outputs.baseline_status }}
+  routine:
+    description: "Number of returned low-severity changes."
+    value: ${{ steps.check.outputs.routine }}
+  notable:
+    description: "Number of returned medium/high changes, including acknowledged events."
+    value: ${{ steps.check.outputs.notable }}
+  fail_on:
+    description: "Applied open-event threshold: never, high or medium. Invalid configuration reports invalid and fails."
+    value: ${{ steps.check.outputs.fail_on }}
+  source_error:
+    description: "At least one feed request failed validation or transport."
+    value: ${{ steps.check.outputs.source_error }}
+  invalid_inputs:
+    description: "Count of excluded invalid names."
+    value: ${{ steps.check.outputs.invalid_inputs }}
+  check_status:
+    description: "Outcome: notable, no_notable_events, unknown_coverage, partial, unavailable or not_checked"
+    value: ${{ steps.check.outputs.check_status }}
+  covered:
+    description: "Count of packages with evidence of observation in the requested window"
+    value: ${{ steps.check.outputs.covered }}
+  unknown:
+    description: "Count of packages without evidence of observation"
+    value: ${{ steps.check.outputs.unknown }}
+  truncated:
+    description: "At least one returned page omitted events"
+    value: ${{ steps.check.outputs.truncated }}
+  coverage_complete:
+    description: "Observed all requested packages with both feeds readable and an untruncated result"
+    value: ${{ steps.check.outputs.coverage_complete }}
   events:
     description: "Number of open (unacknowledged) notable drift events."
     value: ${{ steps.check.outputs.events }}
@@ -42,12 +82,10 @@ runs:
   steps:
     - id: check
       shell: bash
-      # Никакой сборки и никаких зависимостей: node есть в каждом раннере, запрос один,
-      # ключа не нужно. Чем меньше шагов между «добавил в workflow» и «работает», тем выше
-      # шанс, что это действительно поставят.
-      run: node ${{ github.action_path }}/check.mjs
+      run: node "$GITHUB_ACTION_PATH/check.mjs"
       env:
         INPUT_PACKAGES: ${{ inputs.packages }}
+        INPUT_SHARE_DISCOVERED: ${{ inputs.share-discovered }}
         INPUT_DAYS: ${{ inputs.days }}
         INPUT_FAIL_ON: ${{ inputs.fail-on }}
         INPUT_API: ${{ inputs.api }}
