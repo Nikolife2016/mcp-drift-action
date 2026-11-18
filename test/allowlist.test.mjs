@@ -14,21 +14,24 @@ const HIGH = { eventId: "eb9c6cb717f2e882", id: "@modelcontextprotocol/sdk", typ
 const HIGH2 = { ...HIGH, eventId: "0123456789abcdef", at: "2026-09-19T01:33:01.592Z", headline: "Another maintainer change." };
 const LOW = { eventId: "ffffffffffffffff", id: "@modelcontextprotocol/sdk", type: "version_published", severity: "low", at: "2026-09-10T00:00:00Z", headline: "New version." };
 
-async function withServer(events, fn) {
-  const srv = createServer((req, res) => { res.setHeader("content-type", "application/json"); res.end(JSON.stringify({ events })); });
+async function withServer(events, fn, { status = 200, requested } = {}) {
+  const srv = createServer((req, res) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify({ events, requested }));
+  });
   await new Promise(r => srv.listen(0, "127.0.0.1", r));
   try { return await fn(`http://127.0.0.1:${srv.address().port}`); } finally { srv.close(); }
 }
 
 // Асинхронно: сервер живёт в этом же процессе, и синхронный запуск заблокировал бы цикл событий —
 // дочерний check.mjs ждал бы ответа вечно (первая версия теста так и висла).
-function run(api, { allowlist, failOn = "high" } = {}) {
+function run(api, { allowlist, failOn = "high", packages = "@modelcontextprotocol/sdk", selfCheck = false } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mda-"));
   const outFile = join(dir, "gh-output");
   if (allowlist !== undefined) writeFileSync(join(dir, ".mcp-drift-allowlist.json"), typeof allowlist === "string" ? allowlist : JSON.stringify(allowlist));
   return new Promise(resolve => {
     const child = spawn(process.execPath, [CHECK], { cwd: dir,
-      env: { ...process.env, INPUT_API: api, INPUT_PACKAGES: "@modelcontextprotocol/sdk", INPUT_FAIL_ON: failOn, GITHUB_OUTPUT: outFile, GITHUB_STEP_SUMMARY: "" } });
+      env: { ...process.env, INPUT_API: api, INPUT_PACKAGES: packages, PULSEFEED_SELF_CHECK: String(selfCheck), INPUT_FAIL_ON: failOn, GITHUB_OUTPUT: outFile, GITHUB_STEP_SUMMARY: "" } });
     let out = "";
     child.stdout.on("data", d => out += d); child.stderr.on("data", d => out += d);
     child.on("close", code => {
@@ -95,3 +98,30 @@ test("контроль: без событий подтверждения нич�
   assert.match(r.out, /No notable drift/);
   assert.equal(r.outputs.acknowledged, "0");
 }));
+
+const selfCheckPackages = ["@modelcontextprotocol/server-filesystem", "mcp-remote", "@upstash/context7-mcp"];
+const selfCheckOptions = { packages: selfCheckPackages.join(","), failOn: "never", selfCheck: true };
+
+test("self-check accepts a scoped empty feed", () => withServer([], async api => {
+  const r = await run(api, selfCheckOptions);
+  assert.equal(r.code, 0);
+  assert.match(r.out, /3 package\(s\)/);
+}, { requested: selfCheckPackages }));
+
+test("HTTP 502 fails the self-check but preserves ordinary CI's fail-open behavior", () => withServer([], async api => {
+  assert.equal((await run(api, selfCheckOptions)).code, 1);
+  assert.equal((await run(api)).code, 0);
+}, { status: 502 }));
+
+test("self-check rejects a missing scope, omitted package or invalid events", async () => {
+  for (const [events, requested] of [[[], undefined], [[], selfCheckPackages.slice(1)], [{}, selfCheckPackages], [[{}], selfCheckPackages]]) {
+    await withServer(events, async api => {
+      assert.equal((await run(api, selfCheckOptions)).code, 1);
+    }, { requested });
+  }
+});
+
+test("self-check cannot pass when there are no input packages", async () => {
+  const r = await run("http://127.0.0.1", { ...selfCheckOptions, packages: "" });
+  assert.equal(r.code, 1);
+});
