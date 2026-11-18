@@ -15,6 +15,8 @@ const DAYS = Math.max(1, Math.min(365, Number(process.env.INPUT_DAYS) || 30));
 const FAIL_ON = (process.env.INPUT_FAIL_ON || "high").toLowerCase();
 const ALLOWLIST = process.env.INPUT_ALLOWLIST || ".mcp-drift-allowlist.json";
 
+const SELF_CHECK = process.env.PULSEFEED_SELF_CHECK === "true";
+
 const SEV_RANK = { high: 3, medium: 2, low: 1 };
 
 // ── откуда берём список пакетов ────────────────────────────────────────────
@@ -132,7 +134,7 @@ const packages = manual.length ? manual : autodetect();
 if (!packages.length) {
   console.log("MCP Drift Check: no packages found to check (no package.json, no MCP config). Nothing to do.");
   out("events", 0); out("high", 0); out("acknowledged", 0);
-  process.exit(0);
+  process.exit(SELF_CHECK ? 1 : 0);
 }
 
 // Ограничение API — 200 имён на запрос; режем на пачки, чтобы монорепозиторий не обрезался молча.
@@ -147,9 +149,22 @@ try {
     const r = await fetch(url, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(30_000) });   // зависшая сеть не должна держать шаг вечно
     if (!r.ok) throw new Error(`${API} answered ${r.status}`);
     const j = await r.json();
+    if (SELF_CHECK) {
+      if (!Array.isArray(j?.requested) || j.requested.length !== c.length || !c.every(pkg => j.requested.includes(pkg))) {
+        throw new Error("response does not confirm the requested packages");
+      }
+      if (!Array.isArray(j.events) || !j.events.every(e => e && c.includes(e.id)
+        && Object.hasOwn(SEV_RANK, e.severity) && typeof e.type === "string" && typeof e.headline === "string")) {
+        throw new Error("invalid events in drift response");
+      }
+    }
     events.push(...(j.events || []));
   }
 } catch (e) {
+  if (SELF_CHECK) {
+    console.error(`MCP Drift self-check failed: ${e.message}`);
+    process.exit(1);
+  }
   // Недоступность нашего сервиса — не повод рушить чужую сборку. Мы говорим об этом вслух
   // и выходим успешно: ложно-красный CI отключают первым же коммитом, и проверки не станет.
   console.log(`MCP Drift Check: could not reach PulseFeed (${e.message}). Skipping without failing the build.`);

@@ -19,6 +19,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./
+        env:
+          PULSEFEED_SELF_CHECK: "true"
         with:
           packages: "@modelcontextprotocol/server-filesystem,mcp-remote,@upstash/context7-mcp"
           fail-on: never
